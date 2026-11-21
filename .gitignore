@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+emails.txt
+emails.json
+emails.md
+cookies.txt

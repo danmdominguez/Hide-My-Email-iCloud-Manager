@@ -8,6 +8,23 @@ from rich.table import Table
 
 console = Console()
 
+# Fields Apple is known to return, in reading order. Any extra key on a
+# record is still exported after these.
+PREFERRED_FIELDS = [
+    "anonymousId",
+    "hme",
+    "isActive",
+    "label",
+    "note",
+    "forwardToEmail",
+    "createTimestamp",
+    "origin",
+    "originAppName",
+    "appBundleId",
+    "domain",
+    "recipientMailId",
+]
+
 
 # -------------------------------------------------------
 # LOAD COOKIES
@@ -159,6 +176,61 @@ def delete_hme(cookies: Dict[str, str], anon_id: str):
 
 
 # -------------------------------------------------------
+# EXPORT
+# -------------------------------------------------------
+
+def export_columns(hme_list: List[Dict]) -> List[str]:
+    """Every key present on any record, known fields first."""
+    present = set()
+    for record in hme_list:
+        present.update(record.keys())
+    columns = [name for name in PREFERRED_FIELDS if name in present]
+    columns.extend(sorted(present.difference(columns)))
+    return columns
+
+
+def format_cell(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def markdown_cell(value) -> str:
+    text = format_cell(value)
+    text = text.replace("\\", "\\\\").replace("|", "\\|")
+    text = text.replace("\r\n", "<br>").replace("\n", "<br>").replace("\r", "<br>")
+    return text
+
+
+def save_export(hme_list: List[Dict]) -> List[str]:
+    """Write the full API records. emails.json is the complete capture."""
+    columns = export_columns(hme_list)
+
+    with open("emails.json", "w", encoding="utf-8") as f:
+        json.dump(hme_list, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    with open("emails.txt", "w", encoding="utf-8") as f:
+        for record in hme_list:
+            parts = [
+                f"{column}: {json.dumps(record.get(column), ensure_ascii=False)}"
+                for column in columns
+            ]
+            f.write(" | ".join(parts) + "\n")
+
+    with open("emails.md", "w", encoding="utf-8") as f:
+        f.write("| " + " | ".join(columns) + " |\n")
+        f.write("| " + " | ".join("---" for _ in columns) + " |\n")
+        for record in hme_list:
+            cells = [markdown_cell(record.get(column)) for column in columns]
+            f.write("| " + " | ".join(cells) + " |\n")
+
+    return columns
+
+
+# -------------------------------------------------------
 # CLI
 # -------------------------------------------------------
 
@@ -197,23 +269,18 @@ def main(export_only: bool = False):
         console.print("[yellow]No Hide My Email entries found.[/]")
         return
 
-    # Save to file
-    with open("emails.txt", "w", encoding="utf-8") as f:
-        for h in hme_list:
-            f.write(
-                f"anonymousId: {h['anonymousId']} | email: {h['hme']} | active: {h['isActive']}\n"
-            )
+    columns = save_export(hme_list)
+    console.print(
+        f"[green]Saved {len(hme_list)} entries "
+        f"({len(columns)} fields) to emails.json, emails.txt, and emails.md[/]\n"
+    )
 
-    console.print(f"[green]Saved {len(hme_list)} entries to emails.txt[/]\n")
-
-    # Table
     table = Table(title="Hide My Email Entries")
-    table.add_column("ID")
-    table.add_column("Email")
-    table.add_column("Active")
+    for column in columns:
+        table.add_column(column)
 
-    for h in hme_list:
-        table.add_row(h["anonymousId"], h["hme"], str(h["isActive"]))
+    for record in hme_list:
+        table.add_row(*(format_cell(record.get(column)) for column in columns))
 
     console.print(table)
 
