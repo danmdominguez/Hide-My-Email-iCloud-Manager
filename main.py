@@ -1,28 +1,22 @@
 import argparse
 import json
 import time
+from datetime import datetime
 from typing import Dict, List
 import requests
 from rich.console import Console
-from rich.table import Table
 
 console = Console()
 
-# Fields Apple is known to return, in reading order. Any extra key on a
-# record is still exported after these.
-PREFERRED_FIELDS = [
-    "anonymousId",
-    "hme",
-    "isActive",
+# Markdown columns, left to right. Records are grouped by forwarding
+# address, then active and inactive, newest first inside each table.
+OUTPUT_FIELDS = [
     "label",
+    "hme",
     "note",
-    "forwardToEmail",
     "createTimestamp",
-    "origin",
-    "originAppName",
-    "appBundleId",
-    "domain",
-    "recipientMailId",
+    "isActive",
+    "anonymousId",
 ]
 
 
@@ -179,16 +173,6 @@ def delete_hme(cookies: Dict[str, str], anon_id: str):
 # EXPORT
 # -------------------------------------------------------
 
-def export_columns(hme_list: List[Dict]) -> List[str]:
-    """Every key present on any record, known fields first."""
-    present = set()
-    for record in hme_list:
-        present.update(record.keys())
-    columns = [name for name in PREFERRED_FIELDS if name in present]
-    columns.extend(sorted(present.difference(columns)))
-    return columns
-
-
 def format_cell(value) -> str:
     if value is None:
         return ""
@@ -197,36 +181,75 @@ def format_cell(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def markdown_cell(value) -> str:
-    text = format_cell(value)
+def format_timestamp(value) -> str:
+    if value in (None, ""):
+        return ""
+    moment = datetime.fromtimestamp(int(value) / 1000)
+    return moment.strftime("%Y.%m.%d %H%M")
+
+
+def display_value(column: str, value) -> str:
+    if column == "createTimestamp":
+        return format_timestamp(value)
+    return format_cell(value)
+
+
+def markdown_cell(column: str, value) -> str:
+    text = display_value(column, value)
     text = text.replace("\\", "\\\\").replace("|", "\\|")
     text = text.replace("\r\n", "<br>").replace("\n", "<br>").replace("\r", "<br>")
     return text
 
 
+def record_timestamp(record: Dict) -> int:
+    value = record.get("createTimestamp") or 0
+    return int(value)
+
+
+def render_table(records: List[Dict], columns: List[str]) -> str:
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for record in records:
+        cells = [markdown_cell(column, record.get(column)) for column in columns]
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def render_markdown(hme_list: List[Dict], columns: List[str]) -> str:
+    grouped: Dict[str, List[Dict]] = {}
+    for record in hme_list:
+        address = record.get("forwardToEmail") or ""
+        grouped.setdefault(address, []).append(record)
+
+    def group_order(address: str):
+        newest = max(record_timestamp(record) for record in grouped[address])
+        return (-newest, address.lower())
+
+    parts = []
+    for address in sorted(grouped, key=group_order):
+        records = grouped[address]
+        parts.append(f"## {address or '(no forwarding address)'}")
+        parts.append("")
+        sections = (
+            ("Active", [record for record in records if record.get("isActive")]),
+            ("Inactive", [record for record in records if not record.get("isActive")]),
+        )
+        for label, section in sections:
+            section.sort(key=record_timestamp, reverse=True)
+            parts.append(f"### {label}")
+            parts.append("")
+            parts.append(render_table(section, columns))
+            parts.append("")
+    return "\n".join(parts)
+
+
 def save_export(hme_list: List[Dict]) -> List[str]:
-    """Write the full API records. emails.json is the complete capture."""
-    columns = export_columns(hme_list)
-
-    with open("emails.json", "w", encoding="utf-8") as f:
-        json.dump(hme_list, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-
-    with open("emails.txt", "w", encoding="utf-8") as f:
-        for record in hme_list:
-            parts = [
-                f"{column}: {json.dumps(record.get(column), ensure_ascii=False)}"
-                for column in columns
-            ]
-            f.write(" | ".join(parts) + "\n")
-
+    """Write one Active and Inactive table under each forwarding address."""
+    columns = list(OUTPUT_FIELDS)
     with open("emails.md", "w", encoding="utf-8") as f:
-        f.write("| " + " | ".join(columns) + " |\n")
-        f.write("| " + " | ".join("---" for _ in columns) + " |\n")
-        for record in hme_list:
-            cells = [markdown_cell(record.get(column)) for column in columns]
-            f.write("| " + " | ".join(cells) + " |\n")
-
+        f.write(render_markdown(hme_list, columns))
     return columns
 
 
@@ -272,17 +295,9 @@ def main(export_only: bool = False):
     columns = save_export(hme_list)
     console.print(
         f"[green]Saved {len(hme_list)} entries "
-        f"({len(columns)} fields) to emails.json, emails.txt, and emails.md[/]\n"
+        f"({len(columns)} fields) to emails.md[/]\n"
     )
-
-    table = Table(title="Hide My Email Entries")
-    for column in columns:
-        table.add_column(column)
-
-    for record in hme_list:
-        table.add_row(*(format_cell(record.get(column)) for column in columns))
-
-    console.print(table)
+    console.print(render_markdown(hme_list, columns))
 
     if export_only:
         console.print(
